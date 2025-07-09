@@ -35,7 +35,7 @@ async function run() {
     await client.connect();
 
     //collectons
-    const parcelCollection = client.db("zapShip").collection("parcels");
+    const parcelsCollection = client.db("zapShip").collection("parcels");
     const paymentCollection = client.db("zapShip").collection("payments");
     const usersCollection = client.db("zapShip").collection("users");
     const riderApplicationCollection = client
@@ -160,7 +160,7 @@ async function run() {
 
       const filter = userEmail ? { created_by_email: userEmail } : {};
 
-      const parcels = await parcelCollection
+      const parcels = await parcelsCollection
         .find(filter)
         .sort({ creation_date: -1 }) // newest first
         .toArray();
@@ -181,7 +181,7 @@ async function run() {
           delivery_status: delivery_status || "not_collected",
         };
 
-        const parcels = await parcelCollection.find(query).toArray();
+        const parcels = await parcelsCollection.find(query).toArray();
         res.send(parcels);
       }
     );
@@ -223,7 +223,7 @@ async function run() {
       }
 
       try {
-        const parcelUpdate = await parcelCollection.updateOne(
+        const parcelUpdate = await parcelsCollection.updateOne(
           { _id: new ObjectId(parcelId) },
           {
             $set: {
@@ -242,11 +242,61 @@ async function run() {
       }
     });
 
+    app.get("/parcels/pending-tasks", async (req, res) => {
+      const riderEmail = req.query.email;
+
+      if (!riderEmail) {
+        return res.status(400).send({ message: "Rider email is required" });
+      }
+
+      try {
+        const filter = {
+          assigned_rider_email: riderEmail,
+          delivery_status: { $in: ["Rider_assigned", "in-transit"] },
+        };
+
+        const pendingParcels = await parcelsCollection
+          .find(filter)
+          .sort({ creation_date: -1 })
+          .toArray();
+
+        res.send(pendingParcels);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Failed to fetch pending tasks", error });
+      }
+    });
+
+    app.patch("/parcels/update-status/:id", async (req, res) => {
+      const parcelId = req.params.id;
+      const { status } = req.body;
+
+      if (!ObjectId.isValid(parcelId)) {
+        return res.status(400).send({ message: "Invalid parcel ID" });
+      }
+
+      if (!status || typeof status !== "string") {
+        return res.status(400).send({ message: "Invalid status value" });
+      }
+
+      try {
+        const result = await parcelsCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          { $set: { delivery_status: status } }
+        );
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to update status", error });
+      }
+    });
+
     // GET: get a specific parcel by ID.
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
 
-      const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
+      const parcel = await parcelsCollection.findOne({ _id: new ObjectId(id) });
 
       res.send(parcel);
     });
@@ -254,7 +304,7 @@ async function run() {
     app.delete("/parcels/:id", async (req, res) => {
       const id = req.params.id;
 
-      const result = await parcelCollection.deleteOne({
+      const result = await parcelsCollection.deleteOne({
         _id: new ObjectId(id),
       });
 
@@ -286,7 +336,7 @@ async function run() {
     // POST a new parcel
     app.post("/parcels", async (req, res) => {
       const parcel = req.body;
-      const result = await parcelCollection.insertOne(parcel);
+      const result = await parcelsCollection.insertOne(parcel);
       res.send(result);
     });
 
@@ -321,7 +371,7 @@ async function run() {
       } = req.body;
       // console.log(req.body);
       // 1. Update parcel's payment_status
-      const updateParcel = await parcelCollection.updateOne(
+      const updateParcel = await parcelsCollection.updateOne(
         { _id: new ObjectId(parcelId) },
         { $set: { payment_status: "paid", delivery_status: "not_collected" } }
       );
