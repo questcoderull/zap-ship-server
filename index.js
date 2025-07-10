@@ -85,6 +85,19 @@ async function run() {
       next();
     };
 
+    const verifyRider = async (req, res, next) => {
+      const email = req.decoded.email;
+      console.log(email);
+      const query = { email };
+
+      const user = await usersCollection.findOne(query);
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+
+      next();
+    };
+
     // Search user by email
     app.get("/users/search", async (req, res) => {
       const { email } = req.query;
@@ -242,31 +255,36 @@ async function run() {
       }
     });
 
-    app.get("/parcels/pending-tasks", async (req, res) => {
-      const riderEmail = req.query.email;
+    app.get(
+      "/parcels/pending-tasks",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        const riderEmail = req.query.email;
 
-      if (!riderEmail) {
-        return res.status(400).send({ message: "Rider email is required" });
+        if (!riderEmail) {
+          return res.status(400).send({ message: "Rider email is required" });
+        }
+
+        try {
+          const filter = {
+            assigned_rider_email: riderEmail,
+            delivery_status: { $in: ["Rider_assigned", "in-transit"] },
+          };
+
+          const pendingParcels = await parcelsCollection
+            .find(filter)
+            .sort({ creation_date: -1 })
+            .toArray();
+
+          res.send(pendingParcels);
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Failed to fetch pending tasks", error });
+        }
       }
-
-      try {
-        const filter = {
-          assigned_rider_email: riderEmail,
-          delivery_status: { $in: ["Rider_assigned", "in-transit"] },
-        };
-
-        const pendingParcels = await parcelsCollection
-          .find(filter)
-          .sort({ creation_date: -1 })
-          .toArray();
-
-        res.send(pendingParcels);
-      } catch (error) {
-        res
-          .status(500)
-          .send({ message: "Failed to fetch pending tasks", error });
-      }
-    });
+    );
 
     app.patch("/parcels/update-status/:id", async (req, res) => {
       const parcelId = req.params.id;
@@ -281,9 +299,19 @@ async function run() {
       }
 
       try {
+        const updateFields = {
+          delivery_status: status,
+        };
+
+        if (status === "delivered") {
+          updateFields.delivered_at = new Date();
+        } else if (status === "in-transit") {
+          updateFields.picked_up_at = new Date();
+        }
+
         const result = await parcelsCollection.updateOne(
           { _id: new ObjectId(parcelId) },
-          { $set: { delivery_status: status } }
+          { $set: updateFields }
         );
 
         res.send(result);
@@ -291,6 +319,144 @@ async function run() {
         res.status(500).send({ message: "Failed to update status", error });
       }
     });
+
+    app.get(
+      "/parcels/completed",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        const riderEmail = req.query.email;
+
+        if (!riderEmail) {
+          return res.status(400).send({ message: "Rider email is required" });
+        }
+
+        try {
+          const filter = {
+            assigned_rider_email: riderEmail,
+            delivery_status: { $in: ["delivered", "service_center_delivered"] },
+          };
+
+          const completedParcels = await parcelsCollection
+            .find(filter)
+            .sort({ creation_date: -1 })
+            .toArray();
+
+          res.send(completedParcels);
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Failed to fetch completed deliveries", error });
+        }
+      }
+    );
+
+    // patch method for updating cashout status.
+    app.patch(
+      "/parcels/:id/cashout",
+
+      async (req, res) => {
+        const id = req.params.id;
+        const result = await parcelsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              cashout_status: "cashed_out",
+              cashed_out_at: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      }
+    );
+
+    app.get(
+      "/parcels/rider-earnings",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        const email = req.query.email;
+
+        if (!email) {
+          return res.status(400).send({ message: "Email is required" });
+        }
+
+        try {
+          const parcels = await parcelsCollection
+            .find({
+              assigned_rider_email: email,
+              delivery_status: "delivered",
+            })
+            .toArray();
+
+          let total = 0;
+          let cashed_out = 0;
+          let pending = 0;
+
+          let today = 0,
+            week = 0,
+            month = 0,
+            year = 0;
+
+          const now = new Date();
+          const todayDate = now.toDateString();
+          const weekStart = new Date(now.setDate(now.getDate() - now.getDay()));
+          const monthStart = new Date(
+            new Date().getFullYear(),
+            new Date().getMonth(),
+            1
+          );
+          const yearStart = new Date(new Date().getFullYear(), 0, 1);
+
+          for (const parcel of parcels) {
+            const fee = parcel.delivery_cost || 0;
+            const sameDistrict =
+              parcel.sender_region === parcel.receiver_region;
+            const earning = sameDistrict ? fee * 0.8 : fee * 0.3;
+
+            total += earning;
+
+            const deliveredAt = new Date(parcel.delivered_at);
+
+            if (parcel.cashout_status === "cashed_out") {
+              cashed_out += earning;
+            } else {
+              pending += earning;
+            }
+
+            if (deliveredAt.toDateString() === todayDate) {
+              today += earning;
+            }
+
+            if (deliveredAt >= weekStart) {
+              week += earning;
+            }
+
+            if (deliveredAt >= monthStart) {
+              month += earning;
+            }
+
+            if (deliveredAt >= yearStart) {
+              year += earning;
+            }
+          }
+
+          res.send({
+            overall: total.toFixed(0),
+            total: total.toFixed(0),
+            cashed_out: cashed_out.toFixed(0),
+            pending: pending.toFixed(0),
+            today: today.toFixed(0),
+            week: week.toFixed(0),
+            month: month.toFixed(0),
+            year: year.toFixed(0),
+          });
+        } catch (error) {
+          console.error("Error calculating rider earnings", error);
+          res.status(500).send({ error: "Failed to calculate earnings" });
+        }
+      }
+    );
 
     // GET: get a specific parcel by ID.
     app.get("/parcels/:id", async (req, res) => {
